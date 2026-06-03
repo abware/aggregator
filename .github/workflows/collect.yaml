@@ -17,7 +17,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pyyaml
 
-      - name: Run collect (生成原始配置到 Gist)
+      - name: Run collect (原始上传)
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
         run: |
@@ -26,36 +26,63 @@ jobs:
             -k ${{ secrets.GIST_TOKEN }} \
             -t clash
 
-      - name: Patch Gist directly (从 Gist 下载→补全→上传)
+      - name: Patch Gist directly
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          # 用 GitHub CLI 登录
-          echo "$GIST_TOKEN" | gh auth login --with-token
+          # 生成补丁脚本
+          cat > patch_gist.py << 'EOF'
+          import requests, yaml, os, sys
 
-          # 获取 Gist 里唯一的文件名（无论它叫什么）
-          FILENAME=$(gh gist view "$GIST_ID" --json files -q '.files[].filename' | head -1)
-          echo "Found file: $FILENAME"
+          gist_id = os.environ['GIST_ID']
+          token = os.environ['GIST_TOKEN']
+          headers = {'Authorization': f'token {token}'}
 
-          # 下载原始内容
-          gh gist view "$GIST_ID" --raw -f "$FILENAME" > original.yaml
+          # 1. 下载 Gist 当前文件
+          resp = requests.get(f'https://api.github.com/gists/{gist_id}', headers=headers)
+          if resp.status_code != 200:
+              print(f"ERROR: Cannot get gist {resp.status_code} {resp.text}")
+              sys.exit(1)
+          gist = resp.json()
+          # 获取第一个文件名
+          filename = list(gist['files'].keys())[0]
+          content = gist['files'][filename]['content']
+          print(f"Found file: {filename}")
 
-          # 用 Python 补全 proxy-groups 和 rules
-          python3 -c "
-import yaml
-with open('original.yaml','r',encoding='utf-8') as f:
-    data = yaml.safe_load(f)
-proxy_names = [p['name'] for p in data['proxies']]
-data['proxy-groups'] = [
-    {'name': '🚀 手动选择', 'type': 'select', 'proxies': proxy_names + ['DIRECT']},
-    {'name': '⚡ 自动选择', 'type': 'url-test', 'proxies': proxy_names, 'url': 'http://www.gstatic.com/generate_204', 'interval': 300}
-]
-data['rules'] = ['MATCH,🚀 手动选择']
-with open('patched.yaml','w',encoding='utf-8') as f:
-    yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-          "
+          # 2. 补全配置
+          data = yaml.safe_load(content)
+          proxy_names = [p['name'] for p in data['proxies']]
+          data['proxy-groups'] = [
+              {
+                  'name': '🚀 手动选择',
+                  'type': 'select',
+                  'proxies': proxy_names + ['DIRECT']
+              },
+              {
+                  'name': '⚡ 自动选择',
+                  'type': 'url-test',
+                  'proxies': proxy_names,
+                  'url': 'http://www.gstatic.com/generate_204',
+                  'interval': 300
+              }
+          ]
+          data['rules'] = ['MATCH,🚀 手动选择']
 
-          # 覆盖上传到 Gist（保持原文件名）
-          gh gist edit "$GIST_ID" -f "$FILENAME" patched.yaml
-          echo "✅ Done! The Gist now has full config."
+          patched_yaml = yaml.dump(data, allow_unicode=True, default_flow_style=False, sort_keys=False)
+
+          # 3. 上传覆盖
+          patch_resp = requests.patch(
+              f'https://api.github.com/gists/{gist_id}',
+              headers=headers,
+              json={'files': {filename: {'content': patched_yaml}}}
+          )
+          if patch_resp.status_code == 200:
+              print("✅ Patched config uploaded successfully!")
+          else:
+              print(f"❌ Upload failed: {patch_resp.status_code} {patch_resp.text}")
+              sys.exit(1)
+          EOF
+
+          # 执行补丁脚本
+          python patch_gist.py
