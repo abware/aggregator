@@ -1,4 +1,4 @@
-name: Auto Aggregator with Full Config
+name: Auto Aggregator (Full Config)
 
 on:
   schedule:
@@ -10,17 +10,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install pyyaml
+        run: pip install -r requirements.txt pyyaml
 
-      - name: Run collect
+      - name: Run collect (生成原始配置到 Gist)
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
         run: |
@@ -29,34 +26,36 @@ jobs:
             -k ${{ secrets.GIST_TOKEN }} \
             -t clash
 
-      - name: Patch config
-        run: |
-          # 把补丁脚本写入文件，避免内嵌引号和缩进混乱
-          cat > patch.py << 'EOF'
-          import yaml
-
-          with open('clash.yaml', 'r', encoding='utf-8') as f:
-              data = yaml.safe_load(f)
-
-          proxy_names = [p['name'] for p in data['proxies']]
-          data['proxy-groups'] = [{
-              'name': '🚀 手动选择',
-              'type': 'select',
-              'proxies': proxy_names + ['DIRECT']
-          }]
-          data['rules'] = ['MATCH,🚀 手动选择']
-
-          with open('clash.yaml', 'w', encoding='utf-8') as f:
-              yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-          print('Patched successfully')
-          EOF
-          python patch.py
-
-      - name: Upload patched config to Gist
+      - name: Patch Gist directly (从 Gist 下载→补全→上传)
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          # 用 GitHub CLI 更新 Gist，自动处理 JSON 转义
+          # 用 GitHub CLI 登录
           echo "$GIST_TOKEN" | gh auth login --with-token
-          gh gist edit "$GIST_ID" clash.yaml
+
+          # 获取 Gist 里唯一的文件名（无论它叫什么）
+          FILENAME=$(gh gist view "$GIST_ID" --json files -q '.files[].filename' | head -1)
+          echo "Found file: $FILENAME"
+
+          # 下载原始内容
+          gh gist view "$GIST_ID" --raw -f "$FILENAME" > original.yaml
+
+          # 用 Python 补全 proxy-groups 和 rules
+          python3 -c "
+import yaml
+with open('original.yaml','r',encoding='utf-8') as f:
+    data = yaml.safe_load(f)
+proxy_names = [p['name'] for p in data['proxies']]
+data['proxy-groups'] = [
+    {'name': '🚀 手动选择', 'type': 'select', 'proxies': proxy_names + ['DIRECT']},
+    {'name': '⚡ 自动选择', 'type': 'url-test', 'proxies': proxy_names, 'url': 'http://www.gstatic.com/generate_204', 'interval': 300}
+]
+data['rules'] = ['MATCH,🚀 手动选择']
+with open('patched.yaml','w',encoding='utf-8') as f:
+    yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+          "
+
+          # 覆盖上传到 Gist（保持原文件名）
+          gh gist edit "$GIST_ID" -f "$FILENAME" patched.yaml
+          echo "✅ Done! The Gist now has full config."
