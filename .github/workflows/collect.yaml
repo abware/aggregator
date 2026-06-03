@@ -1,6 +1,5 @@
 name: Auto Aggregator
 
-# 触发条件：每天 UTC 时间 0 点和 12 点自动运行，也支持手动触发
 on:
   schedule:
     - cron: '0 0,12 * * *'
@@ -19,7 +18,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -r requirements.txt pyyaml
 
       - name: Run collect script
         env:
@@ -28,4 +27,28 @@ jobs:
           python subscribe/collect.py \
             -g ${{ secrets.GIST_USERNAME }}/${{ secrets.GIST_ID }} \
             -k ${{ secrets.GIST_TOKEN }} \
-            -t clash v2ray singbox
+            -t clash
+
+      - name: Patch config files (补全 proxy-groups 和 rules)
+        run: |
+          # collect.py 会生成 clash.yaml 在当前目录（或指定位置）
+          # 这里假设生成的文件名就是 clash.yaml，且在工作目录根下
+          # 如果它在别处，请调整路径
+          python patch_config.py clash.yaml
+
+      - name: Upload patched config to Gist
+        env:
+          GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+        run: |
+          # 这里需要重新上传修改后的文件到 Gist
+          # 因为 collect.py 已经上传过一遍，我们需要更新它
+          # 最简单的方式是用 gh 命令行工具或直接 curl
+          # 下面给出用 curl 的例子，注意替换 GIST_ID 和 USERNAME
+          GIST_ID="${{ secrets.GIST_ID }}"
+          USERNAME="${{ secrets.GIST_USERNAME }}"
+          CONTENT=$(cat clash.yaml | python -c "import sys,json; print(json.dumps(sys.stdin.read()))")
+          curl -X PATCH \
+            -H "Authorization: token $GIST_TOKEN" \
+            -H "Accept: application/vnd.github.v3+json" \
+            https://api.github.com/gists/$GIST_ID \
+            -d "{\"files\":{\"clash.yaml\":{\"content\":$CONTENT}}}"
