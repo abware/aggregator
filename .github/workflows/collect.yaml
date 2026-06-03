@@ -1,4 +1,4 @@
-name: Auto Aggregator
+name: Auto Aggregator with Full Config
 
 on:
   schedule:
@@ -6,21 +6,21 @@ on:
   workflow_dispatch:
 
 jobs:
-  run:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt pyyaml
+        run: |
+          pip install -r requirements.txt
+          pip install pyyaml
 
-      - name: Run collect script
+      - name: Run collect
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
         run: |
@@ -29,26 +29,34 @@ jobs:
             -k ${{ secrets.GIST_TOKEN }} \
             -t clash
 
-      - name: Patch config files (补全 proxy-groups 和 rules)
+      - name: Patch config
         run: |
-          # collect.py 会生成 clash.yaml 在当前目录（或指定位置）
-          # 这里假设生成的文件名就是 clash.yaml，且在工作目录根下
-          # 如果它在别处，请调整路径
-          python patch_config.py clash.yaml
+          # 把补丁脚本写入文件，避免内嵌引号和缩进混乱
+          cat > patch.py << 'EOF'
+          import yaml
+
+          with open('clash.yaml', 'r', encoding='utf-8') as f:
+              data = yaml.safe_load(f)
+
+          proxy_names = [p['name'] for p in data['proxies']]
+          data['proxy-groups'] = [{
+              'name': '🚀 手动选择',
+              'type': 'select',
+              'proxies': proxy_names + ['DIRECT']
+          }]
+          data['rules'] = ['MATCH,🚀 手动选择']
+
+          with open('clash.yaml', 'w', encoding='utf-8') as f:
+              yaml.dump(data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+          print('Patched successfully')
+          EOF
+          python patch.py
 
       - name: Upload patched config to Gist
         env:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
+          GIST_ID: ${{ secrets.GIST_ID }}
         run: |
-          # 这里需要重新上传修改后的文件到 Gist
-          # 因为 collect.py 已经上传过一遍，我们需要更新它
-          # 最简单的方式是用 gh 命令行工具或直接 curl
-          # 下面给出用 curl 的例子，注意替换 GIST_ID 和 USERNAME
-          GIST_ID="${{ secrets.GIST_ID }}"
-          USERNAME="${{ secrets.GIST_USERNAME }}"
-          CONTENT=$(cat clash.yaml | python -c "import sys,json; print(json.dumps(sys.stdin.read()))")
-          curl -X PATCH \
-            -H "Authorization: token $GIST_TOKEN" \
-            -H "Accept: application/vnd.github.v3+json" \
-            https://api.github.com/gists/$GIST_ID \
-            -d "{\"files\":{\"clash.yaml\":{\"content\":$CONTENT}}}"
+          # 用 GitHub CLI 更新 Gist，自动处理 JSON 转义
+          echo "$GIST_TOKEN" | gh auth login --with-token
+          gh gist edit "$GIST_ID" clash.yaml
